@@ -1,6 +1,7 @@
-pandas
-pyarrow
-omegaconf
-diffusers==0.32.2
-transformers==4.48.0
-torchdiffeq==0.2.4
+diffusers>=0.32.0
+einops
+numpy
+PyYAML
+safetensors
+torch
+transformers>=4.48.0

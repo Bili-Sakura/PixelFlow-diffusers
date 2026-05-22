@@ -1,92 +1,109 @@
-<div align="center">
+# PixelFlow Diffusers Refactor
 
-<h1> PixelFlow: Pixel-Space Generative Models with Flow </h1>
+Diffusers-style PixelFlow implementation (ADM-style layout):
 
-[![arXiv](https://img.shields.io/badge/arXiv%20paper-2504.07963-b31b1b.svg)](https://arxiv.org/abs/2504.07963)&nbsp;
-[![demo](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Online_Demo-blue)](https://huggingface.co/spaces/ShoufaChen/PixelFlow)&nbsp;
+| Path | Purpose |
+| --- | --- |
+| `src/diffusers/models/transformers/` | `PixelFlowTransformer2DModel`, `PixelFlowModel` |
+| `src/diffusers/schedulers/` | `PixelFlowScheduler` |
+| `src/diffusers/pipelines/pixelflow/` | `PixelFlowPipeline`, `PixelFlowPipelineOutput` |
+| `scripts/convert_pixelflow_to_diffusers.py` | Convert legacy checkpoints |
+| `scripts/sample_pixelflow.py` | Sample from converted Hub folders |
 
+Hub bundles built from this lib live at [`src/diffusers/PixelFlow/`](../../src/diffusers/PixelFlow/). Converted checkpoints: [`models/BiliSakura/PixelFlow-diffusers/`](../../models/BiliSakura/PixelFlow-diffusers/).
 
-![pixelflow](https://github.com/user-attachments/assets/7e2e4db9-4b41-46ca-8d43-92f2b642a676)
-
-</div>
-
-
-
-
-> [**PixelFlow: Pixel-Space Generative Models with Flow**](https://arxiv.org/abs/2504.07963)<br>
-> [Shoufa Chen](https://www.shoufachen.com), [Chongjian Ge](https://chongjiange.github.io/), [Shilong Zhang](https://jshilong.github.io/), [Peize Sun](https://peizesun.github.io/), [Ping Luo](http://luoping.me/)
-> <br>The University of Hong Kong, Adobe<br>
-
-## Introduction
-We present PixelFlow, a family of image generation models that operate directly in the raw pixel space, in contrast to the predominant latent-space models. This approach simplifies the image generation process by eliminating the need for a pre-trained Variational Autoencoder (VAE) and enabling the whole model end-to-end trainable. Through efficient cascade flow modeling, PixelFlow achieves affordable computation cost in pixel space. It achieves an FID of 1.98 on 256x256 ImageNet class-conditional image generation benchmark. The qualitative text-to-image results demonstrate that PixelFlow excels in image quality, artistry, and semantic control. We hope this new paradigm will inspire and open up new opportunities for next-generation visual generation models.
-
-
-## Model Zoo
-
-| Model     | Task           | Params | FID  | Checkpoint |
-|:---------:|:--------------:|:------:|:----:|:----------:|
-| PixelFlow | class-to-image | 677M  | 1.98 | [🤗](https://huggingface.co/ShoufaChen/PixelFlow-Class2Image) |
-| PixelFlow | text-to-image  | 882M  | N/A  | [🤗](https://huggingface.co/ShoufaChen/PixelFlow-Text2Image)  |
-
-
-## Setup
-
-### 1. Create Environment
-```bash
-conda create -n pixelflow python=3.12
-conda activate pixelflow
-```
-### 2. Install Dependencies:
-* [PyTorch 2.6.0](https://pytorch.org/) — install it according to your system configuration (CUDA version, etc.).
-* [flash-attention v2.7.4.post1](https://github.com/Dao-AILab/flash-attention/releases/tag/v2.7.4.post1): optional, required only for training.
-* Other packages: `pip3 install -r requirements.txt`
-
-
-## Demo [![demo](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Online_Demo-blue)](https://huggingface.co/spaces/ShoufaChen/PixelFlow)
-
-
-We provide an online [Gradio demo](https://huggingface.co/spaces/ShoufaChen/PixelFlow) for class-to-image generation. 
-
-You can also easily deploy both class-to-image and text-to-image demos locally by:
+## Install
 
 ```bash
-python app.py --checkpoint /path/to/checkpoint --class_cond  # for class-to-image
-```
-or
-```bash
-python app.py --checkpoint /path/to/checkpoint  # for text-to-image
+pip install -e libs/PixelFlow-diffusers
 ```
 
+This installs the conversion and sampling CLI scripts. Inference uses self-contained Hub folders produced by the converter.
 
-## Training
+## Convert a legacy checkpoint
 
-### 1. ImageNet Preparation
-
-- Download the ImageNet dataset from [http://www.image-net.org/](http://www.image-net.org/).
-- Use the [extract_ILSVRC.sh]([extract_ILSVRC.sh](https://github.com/pytorch/examples/blob/main/imagenet/extract_ILSVRC.sh)) to extract and organize the training and validation images into labeled subfolders.
-
-### 2. Training Command
+Class-to-image (256×256):
 
 ```bash
-torchrun --nnodes=1 --nproc_per_node=8 train.py configs/pixelflow_xl_c2i.yaml
+python scripts/convert_pixelflow_to_diffusers.py \
+  --checkpoint models/raw/PixelFlow/c2i/model.pt \
+  --config models/raw/PixelFlow/c2i/config.yaml \
+  --output models/BiliSakura/PixelFlow-diffusers/PixelFlow-256
 ```
 
-## Evaluation (FID, Inception Score, etc.)
-
-We provide a [sample_ddp.py](sample_ddp.py) script, adapted from [DiT](https://github.com/facebookresearch/DiT), for generating sample images and saving them both as a folder and as a .npz file. The .npz file is compatible with ADM's TensorFlow evaluation suite, allowing direct computation of FID, Inception Score, and other metrics.
-
+Text-to-image (1024×1024, T5 loaded at runtime unless exported):
 
 ```bash
-torchrun --nnodes=1 --nproc_per_node=8 sample_ddp.py --pretrained /path/to/checkpoint
+python scripts/convert_pixelflow_to_diffusers.py \
+  --checkpoint models/raw/PixelFlow/t2i/model.pt \
+  --config models/raw/PixelFlow/t2i/config.yaml \
+  --output models/BiliSakura/PixelFlow-diffusers/PixelFlow-T2I \
+  --skip-text-encoder
 ```
 
+To bundle `google/flan-t5-xl` into the output folder, omit `--skip-text-encoder`.
 
-## BibTeX
-```bibtex
-@article{chen2025pixelflow,
-  title={PixelFlow: Pixel-Space Generative Models with Flow},
-  author={Chen, Shoufa and Ge, Chongjian and Zhang, Shilong and Sun, Peize and Luo, Ping},
-  journal={arXiv preprint arXiv:2504.07963},
-  year={2025}
-}
+## Sample images
+
+Class-to-image:
+
+```bash
+python scripts/sample_pixelflow.py \
+  --model models/BiliSakura/PixelFlow-diffusers/PixelFlow-256 \
+  --output demo.png \
+  --class-label 207 \
+  --steps 10 \
+  --cfg 4.0
 ```
+
+Text-to-image:
+
+```bash
+python scripts/sample_pixelflow.py \
+  --model models/BiliSakura/PixelFlow-diffusers/PixelFlow-T2I \
+  --output demo.png \
+  --prompt "A golden retriever playing in a sunny garden" \
+  --steps 10 \
+  --cfg 4.0
+```
+
+## Load from Python
+
+Development (lib package):
+
+```python
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path("libs/PixelFlow-diffusers/src")))
+from diffusers.pipelines.pixelflow.pipeline_pixelflow import PixelFlowPipeline
+
+pipe = PixelFlowPipeline.from_pretrained("models/BiliSakura/PixelFlow-diffusers/PixelFlow-256")
+pipe.to("cuda")
+```
+
+Converted Hub folders (self-contained, no lib install):
+
+```python
+import sys
+from pathlib import Path
+
+variant = Path("models/BiliSakura/PixelFlow-diffusers/PixelFlow-256")
+sys.path.insert(0, str(variant))
+from pipeline import PixelFlowPipeline
+
+pipe = PixelFlowPipeline.from_pretrained(".")
+pipe.to("cuda")
+
+images = pipe(
+    class_labels=207,
+    num_inference_steps=[10, 10, 10, 10],
+    guidance_scale=4.0,
+).images
+```
+
+## Notes
+
+- Hub folders are self-contained: each variant ships `pipeline.py`, component code, and weights.
+- Text-to-image variants use [`google/flan-t5-xl`](https://huggingface.co/google/flan-t5-xl) unless `text_encoder/` is exported during conversion.
+- Upstream training code: [ShoufaChen/PixelFlow](https://github.com/ShoufaChen/PixelFlow).

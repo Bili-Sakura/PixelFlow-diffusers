@@ -1,10 +1,16 @@
 from typing import Tuple, Union
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from diffusers.models.embeddings import Timesteps, TimestepEmbedding, LabelEmbedding
 import warnings
+
+from ..._hf import load_hf_diffusers_submodule
+
+_embeddings = load_hf_diffusers_submodule("models.embeddings")
+LabelEmbedding = _embeddings.LabelEmbedding
+TimestepEmbedding = _embeddings.TimestepEmbedding
+Timesteps = _embeddings.Timesteps
 
 try:
     from flash_attn import flash_attn_varlen_func
@@ -22,7 +28,7 @@ def apply_rotary_emb(
     sin = sin[None, None]
     cos, sin = cos.to(x.device), sin.to(x.device)
 
-    x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)  # [B, S, H, D//2]
+    x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)
     x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
     out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
 
@@ -40,15 +46,13 @@ class PatchEmbed(nn.Module):
             out_unfold += self.proj.bias.to(out_unfold.dtype)
         return out_unfold
 
-    # force fp32 for strict numerical reproducibility (debug only)
-    # @torch.autocast('cuda', enabled=False)
     def forward(self, x):
         if self.training:
             return self.forward_unfold(x)
         out = self.proj(x)
-        out = out.flatten(2).transpose(1, 2)  # BCHW -> BNC
-
+        out = out.flatten(2).transpose(1, 2)
         return out
+
 
 class AdaLayerNorm(nn.Module):
     def __init__(self, embedding_dim):
@@ -63,7 +67,6 @@ class AdaLayerNorm(nn.Module):
         emb = self.linear(self.silu(timestep))
 
         if seqlen_list is not None:
-            # equivalent to `torch.repeat_interleave` but faster
             emb = torch.cat([one_emb[None].expand(repeat_time, -1) for one_emb, repeat_time in zip(emb, seqlen_list)])
         else:
             emb = emb.unsqueeze(1)
@@ -71,7 +74,7 @@ class AdaLayerNorm(nn.Module):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = emb.float().chunk(6, dim=-1)
         x = self.norm(x).float() * (1 + scale_msa) + shift_msa
         return x.to(input_dtype), gate_msa, shift_mlp, scale_mlp, gate_mlp
-    
+
 
 class FeedForward(nn.Module):
     def __init__(self, dim, dim_out=None, mult=4, inner_dim=None, bias=True):
@@ -83,7 +86,7 @@ class FeedForward(nn.Module):
 
     def forward(self, hidden_states):
         hidden_states = self.fc1(hidden_states)
-        hidden_states =  F.gelu(hidden_states, approximate="tanh")
+        hidden_states = F.gelu(hidden_states, approximate="tanh")
         hidden_states = self.fc2(hidden_states)
         return hidden_states
 
@@ -112,16 +115,11 @@ class Attention(nn.Module):
         self.q_proj = nn.Linear(self.q_dim, self.inner_dim, bias=bias)
         self.k_proj = nn.Linear(self.kv_dim, self.inner_dim, bias=bias)
         self.v_proj = nn.Linear(self.kv_dim, self.inner_dim, bias=bias)
-
         self.o_proj = nn.Linear(self.inner_dim, self.q_dim, bias=bias)
-
         self.q_norm = RMSNorm(self.inner_dim)
         self.k_norm = RMSNorm(self.inner_dim)
 
-    def prepare_attention_mask(
-        # https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py#L694
-        self, attention_mask: torch.Tensor, target_length: int, batch_size: int, out_dim: int = 3
-    ):
+    def prepare_attention_mask(self, attention_mask: torch.Tensor, target_length: int, batch_size: int, out_dim: int = 3):
         head_size = self.num_heads
         if attention_mask is None:
             return attention_mask
@@ -151,7 +149,6 @@ class Attention(nn.Module):
         max_seqlen_q=None,
         max_seqlen_k=None,
     ):
-
         inputs_kv = inputs_q if inputs_kv is None else inputs_kv
 
         query_states = self.q_proj(inputs_q)
@@ -177,11 +174,8 @@ class Attention(nn.Module):
 
             if attention_mask is not None:
                 attention_mask = self.prepare_attention_mask(attention_mask, kv_len, bsz)
-                # scaled_dot_product_attention expects attention_mask shape to be
-                # (batch, heads, source_length, target_length)
                 attention_mask = attention_mask.view(bsz, self.num_heads, -1, attention_mask.shape[-1])
 
-            # with torch.nn.attention.sdpa_kernel(backends=[torch.nn.attention.SDPBackend.MATH]):  # strict numerical reproducibility (debug only)
             attn_output = F.scaled_dot_product_attention(
                 query_states,
                 key_states,
@@ -196,45 +190,60 @@ class Attention(nn.Module):
             attn_output = self.o_proj(attn_output)
             return attn_output
 
-        else:
-            # sequence packing mode
-            query_states = query_states.view(-1, self.num_heads, self.head_dim)
-            key_states = key_states.view(-1, self.num_heads, self.head_dim)
-            value_states = value_states.view(-1, self.num_heads, self.head_dim)
+        query_states = query_states.view(-1, self.num_heads, self.head_dim)
+        key_states = key_states.view(-1, self.num_heads, self.head_dim)
+        value_states = value_states.view(-1, self.num_heads, self.head_dim)
 
-            query_states = apply_rotary_emb(query_states.permute(1, 0, 2)[None], rope_pos_embed)[0].permute(1, 0, 2)
-            if not cross_attention:
-                key_states = apply_rotary_emb(key_states.permute(1, 0, 2)[None], rope_pos_embed)[0].permute(1, 0, 2)
+        query_states = apply_rotary_emb(query_states.permute(1, 0, 2)[None], rope_pos_embed)[0].permute(1, 0, 2)
+        if not cross_attention:
+            key_states = apply_rotary_emb(key_states.permute(1, 0, 2)[None], rope_pos_embed)[0].permute(1, 0, 2)
 
-            attn_output = flash_attn_varlen_func(
-                query_states,
-                key_states,
-                value_states,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-            )
+        attn_output = flash_attn_varlen_func(
+            query_states,
+            key_states,
+            value_states,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+        )
 
-            attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
-            attn_output = self.o_proj(attn_output)
-            return attn_output
+        attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
+        attn_output = self.o_proj(attn_output)
+        return attn_output
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, num_attention_heads, attention_head_dim, dropout=0.0,
-        cross_attention_dim=None, attention_bias=False,
+    def __init__(
+        self,
+        dim,
+        num_attention_heads,
+        attention_head_dim,
+        dropout=0.0,
+        cross_attention_dim=None,
+        attention_bias=False,
     ):
         super().__init__()
         self.norm1 = AdaLayerNorm(dim)
-
-        # Self Attention
-        self.attn1 = Attention(q_dim=dim, kv_dim=None, heads=num_attention_heads, head_dim=attention_head_dim, dropout=dropout, bias=attention_bias)
+        self.attn1 = Attention(
+            q_dim=dim,
+            kv_dim=None,
+            heads=num_attention_heads,
+            head_dim=attention_head_dim,
+            dropout=dropout,
+            bias=attention_bias,
+        )
 
         if cross_attention_dim is not None:
-            # Cross Attention
             self.norm2 = RMSNorm(dim, eps=1e-6)
-            self.attn2 = Attention(q_dim=dim, kv_dim=cross_attention_dim, heads=num_attention_heads, head_dim=attention_head_dim, dropout=dropout, bias=attention_bias)
+            self.attn2 = Attention(
+                q_dim=dim,
+                kv_dim=cross_attention_dim,
+                heads=num_attention_heads,
+                head_dim=attention_head_dim,
+                dropout=dropout,
+                bias=attention_bias,
+            )
         else:
             self.attn2 = None
 
@@ -292,11 +301,22 @@ class TransformerBlock(nn.Module):
         hidden_states = ff_output + hidden_states
 
         return hidden_states
-    
+
 
 class PixelFlowModel(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, num_attention_heads, attention_head_dim,
-        depth, patch_size, dropout=0.0, cross_attention_dim=None, attention_bias=True, num_classes=0,
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        num_attention_heads,
+        attention_head_dim,
+        depth,
+        patch_size,
+        dropout=0.0,
+        cross_attention_dim=None,
+        attention_bias=True,
+        num_classes=0,
+        init_weights=True,
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -309,40 +329,46 @@ class PixelFlowModel(torch.nn.Module):
 
         self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=1)
         self.timestep_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embed_dim)
-
-        # [stage] embedding
         self.latent_size_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embed_dim)
         if self.num_classes > 0:
-            # class conditional
             self.class_embedder = LabelEmbedding(num_classes, embed_dim, dropout_prob=0.1)
 
-        self.transformer_blocks = nn.ModuleList([
-            TransformerBlock(embed_dim, num_attention_heads, attention_head_dim, dropout, cross_attention_dim, attention_bias) for _ in range(depth)
-        ])
+        self.transformer_blocks = nn.ModuleList(
+            [
+                TransformerBlock(
+                    embed_dim,
+                    num_attention_heads,
+                    attention_head_dim,
+                    dropout,
+                    cross_attention_dim,
+                    attention_bias,
+                )
+                for _ in range(depth)
+            ]
+        )
 
         self.norm_out = nn.LayerNorm(embed_dim, elementwise_affine=False, eps=1e-6)
         self.proj_out_1 = nn.Linear(embed_dim, 2 * embed_dim)
         self.proj_out_2 = nn.Linear(embed_dim, patch_size * patch_size * out_channels)
 
-        self.initialize_from_scratch()
+        if init_weights:
+            self.initialize_from_scratch()
 
     def initialize_from_scratch(self):
-        print("Starting Initialization...")
         def _basic_init(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(_basic_init)
 
-        # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
         w = self.patch_embed.proj.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.patch_embed.proj.bias, 0)
 
         nn.init.normal_(self.timestep_embedder.linear_1.weight, std=0.02)
         nn.init.normal_(self.timestep_embedder.linear_2.weight, std=0.02)
-
         nn.init.normal_(self.latent_size_embedder.linear_1.weight, std=0.02)
         nn.init.normal_(self.latent_size_embedder.linear_2.weight, std=0.02)
 
@@ -372,7 +398,6 @@ class PixelFlowModel(torch.nn.Module):
         seqlen_list_q=None,
         seqlen_list_k=None,
     ):
-        # convert encoder_attention_mask to a bias the same way we do for attention_mask
         if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
             encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
@@ -381,9 +406,8 @@ class PixelFlowModel(torch.nn.Module):
         hidden_states = hidden_states.to(torch.float32)
         hidden_states = self.patch_embed(hidden_states)
 
-        # timestep, class_embed, latent_size_embed
         timesteps_proj = self.time_proj(timestep)
-        conditioning = self.timestep_embedder(timesteps_proj.to(dtype=hidden_states.dtype)) 
+        conditioning = self.timestep_embedder(timesteps_proj.to(dtype=hidden_states.dtype))
 
         if self.num_classes > 0:
             class_embed = self.class_embedder(class_labels)
@@ -422,28 +446,8 @@ class PixelFlowModel(torch.nn.Module):
             return hidden_states
 
         height, width = orig_height // self.patch_size, orig_width // self.patch_size
-        hidden_states = hidden_states.reshape(
-            shape=(-1, height, width, self.patch_size, self.patch_size, self.out_channels)
-        )
+        hidden_states = hidden_states.reshape(shape=(-1, height, width, self.patch_size, self.patch_size, self.out_channels))
         hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
-        output = hidden_states.reshape(
-            shape=(-1, self.out_channels, height * self.patch_size, width * self.patch_size)
-        )
+        output = hidden_states.reshape(shape=(-1, self.out_channels, height * self.patch_size, width * self.patch_size))
 
-        return output
-
-    def c2i_forward_cfg_torchdiffq(self, hidden_states, timestep, class_labels, latent_size, pos_embed, cfg_scale):
-        # used for evaluation with ODE ('dopri5') solver from torchdiffeq
-        half = hidden_states[: len(hidden_states)//2]
-        combined = torch.cat([half, half], dim=0)
-        out = self.forward(
-            hidden_states=combined,
-            timestep=timestep,
-            class_labels=class_labels,
-            latent_size=latent_size,
-            pos_embed=pos_embed,
-        )
-        uncond_out, cond_out  = torch.split(out, len(out)//2, dim=0)
-        half_output = uncond_out + cfg_scale * (cond_out - uncond_out)
-        output = torch.cat([half_output, half_output], dim=0)
         return output
