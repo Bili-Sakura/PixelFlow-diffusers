@@ -1,4 +1,3 @@
-from .modeling_pixelflow import PixelFlowModel
-from .transformer_pixelflow import PixelFlowTransformer2DModel
+from .transformer_pixelflow import PixelFlowModel, PixelFlowTransformer2DModel
 
 __all__ = ["PixelFlowModel", "PixelFlowTransformer2DModel"]
