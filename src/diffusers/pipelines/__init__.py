@@ -1,3 +1,3 @@
-from .pixelflow import PixelFlowPipeline, PixelFlowPipelineOutput
+from .pixelflow import PixelFlowPipeline, PixelFlowT2IPipeline
 
-__all__ = ["PixelFlowPipeline", "PixelFlowPipelineOutput"]
+__all__ = ["PixelFlowPipeline", "PixelFlowT2IPipeline"]

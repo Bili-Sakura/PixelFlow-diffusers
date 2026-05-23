@@ -1,7 +1,7 @@
 """Diffusers-style PixelFlow package."""
 
 from .models import PixelFlowModel, PixelFlowTransformer2DModel
-from .pipelines import PixelFlowPipeline, PixelFlowPipelineOutput
+from .pipelines import PixelFlowPipeline, PixelFlowT2IPipeline
 from .schedulers import PixelFlowScheduler
 
 __all__ = [
@@ -9,5 +9,5 @@ __all__ = [
     "PixelFlowTransformer2DModel",
     "PixelFlowScheduler",
     "PixelFlowPipeline",
-    "PixelFlowPipelineOutput",
+    "PixelFlowT2IPipeline",
 ]

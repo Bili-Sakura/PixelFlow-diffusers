@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -29,18 +30,23 @@ def main() -> None:
     model_path = Path(args.model).resolve()
     sys.path.insert(0, str(model_path))
 
-    from pipeline import PixelFlowPipeline
-
-    pipe = PixelFlowPipeline.from_pretrained(str(model_path)).to(args.device)
-    generator = torch.Generator(device=args.device).manual_seed(args.seed)
-
     metadata_path = model_path / "conversion_metadata.json"
+    model_index_path = model_path / "model_index.json"
     is_t2i = False
     if metadata_path.exists():
-        import json
-
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         is_t2i = metadata.get("task") == "text-to-image"
+    elif model_index_path.exists():
+        model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
+        is_t2i = model_index.get("_class_name") == "PixelFlowT2IPipeline"
+
+    if is_t2i:
+        from pipeline import PixelFlowT2IPipeline as PipelineCls
+    else:
+        from pipeline import PixelFlowPipeline as PipelineCls
+
+    pipe = PipelineCls.from_pretrained(str(model_path)).to(args.device)
+    generator = torch.Generator(device=args.device).manual_seed(args.seed)
 
     num_stages = pipe.scheduler.num_stages
     call_kwargs = {
@@ -52,8 +58,7 @@ def main() -> None:
     }
 
     if is_t2i:
-        prompt = args.prompt or "A golden retriever playing in a sunny garden"
-        call_kwargs["prompt"] = prompt
+        call_kwargs["prompt"] = args.prompt or "A golden retriever playing in a sunny garden"
     else:
         call_kwargs["class_labels"] = [args.class_label]
 

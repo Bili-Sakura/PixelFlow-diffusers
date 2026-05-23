@@ -14,7 +14,8 @@ import yaml
 
 LIB_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = LIB_ROOT.parent.parent
-SRC_BUNDLE = REPO_ROOT / "src" / "diffusers" / "PixelFlow"
+SRC_C2I = REPO_ROOT / "src" / "diffusers" / "PixelFlow"
+SRC_T2I = REPO_ROOT / "src" / "diffusers" / "PixelFlow-T2I"
 DEFAULT_TEXT_ENCODER = "google/flan-t5-xl"
 
 
@@ -39,18 +40,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _copy_bundle(out_dir: Path) -> None:
-    if not SRC_BUNDLE.exists():
-        raise FileNotFoundError(f"Hub bundle not found: {SRC_BUNDLE}")
+def _copy_bundle(out_dir: Path, is_t2i: bool) -> None:
+    if not SRC_C2I.exists():
+        raise FileNotFoundError(f"Hub bundle not found: {SRC_C2I}")
 
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
 
-    shutil.copy2(SRC_BUNDLE / "pipeline.py", out_dir / "pipeline.py")
-
-    for folder in ("transformer", "scheduler"):
-        shutil.copytree(SRC_BUNDLE / folder, out_dir / folder)
+    pipeline_src = SRC_T2I if is_t2i else SRC_C2I
+    shutil.copy2(pipeline_src / "pipeline.py", out_dir / "pipeline.py")
+    shutil.copy2(SRC_C2I / "scheduling_pixelflow.py", out_dir / "scheduling_pixelflow.py")
+    shutil.copytree(SRC_C2I / "transformer", out_dir / "transformer")
+    shutil.copytree(SRC_C2I / "scheduler", out_dir / "scheduler")
 
 
 def _is_text_to_image(model_cfg: dict) -> bool:
@@ -74,7 +76,6 @@ def _save_text_encoder(out_dir: Path, text_encoder_name: str) -> None:
 def main() -> None:
     args = build_parser().parse_args()
     out_dir = Path(args.output)
-    _copy_bundle(out_dir)
 
     with open(args.config, encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -84,12 +85,15 @@ def main() -> None:
     resolution = args.resolution or _default_resolution(model_cfg)
     is_t2i = _is_text_to_image(model_cfg)
 
+    _copy_bundle(out_dir, is_t2i=is_t2i)
+
     src_root = LIB_ROOT / "src"
     if str(src_root) not in sys.path:
         sys.path.insert(0, str(src_root))
 
     from diffusers.models.transformers.transformer_pixelflow import PixelFlowTransformer2DModel
     from diffusers.pipelines.pixelflow.pipeline_pixelflow import PixelFlowPipeline
+    from diffusers.pipelines.pixelflow.pipeline_pixelflow_t2i import PixelFlowT2IPipeline
     from diffusers.schedulers.scheduling_pixelflow import PixelFlowScheduler
 
     transformer = PixelFlowTransformer2DModel(
@@ -116,16 +120,15 @@ def main() -> None:
         gamma=-1 / 3,
     )
 
-    pipeline = PixelFlowPipeline(transformer=transformer, scheduler=scheduler)
+    pipeline_cls = PixelFlowT2IPipeline if is_t2i else PixelFlowPipeline
+    pipeline = pipeline_cls(transformer=transformer, scheduler=scheduler)
     pipeline.save_pretrained(str(out_dir))
 
-    # Hub folders ship a self-contained pipeline with dynamic component loading.
-    shutil.copy2(SRC_BUNDLE / "pipeline.py", out_dir / "pipeline.py")
-    shutil.copytree(SRC_BUNDLE / "transformer", out_dir / "transformer", dirs_exist_ok=True)
-    shutil.copytree(SRC_BUNDLE / "scheduler", out_dir / "scheduler", dirs_exist_ok=True)
+    shutil.copy2((SRC_T2I if is_t2i else SRC_C2I) / "pipeline.py", out_dir / "pipeline.py")
+    shutil.copy2(SRC_C2I / "scheduling_pixelflow.py", out_dir / "scheduling_pixelflow.py")
 
     model_index = {
-        "_class_name": "PixelFlowPipeline",
+        "_class_name": "PixelFlowT2IPipeline" if is_t2i else "PixelFlowPipeline",
         "_diffusers_version": "0.36.0",
         "scheduler": ["scheduling_pixelflow", "PixelFlowScheduler"],
         "transformer": ["transformer_pixelflow", "PixelFlowTransformer2DModel"],
